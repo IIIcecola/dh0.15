@@ -1,3 +1,4 @@
+from torch.utils.tensorboard import SummaryWriter
 import torch
 import torch.nn as nn
 import torch.utils.data import DataLoader
@@ -34,7 +35,8 @@ class WarmupCosineScheduler(torch.optim.lr_scheduler._LRScheduler):
       lrs.append(lr)
     return lrs
 
-def train(model, dataloader, optimizer, scheduler, criterion, device, epochs):
+# 新增参数writer
+def train(model, dataloader, optimizer, scheduler, criterion, device, epochs, writer):
   model.train()
 
   for epoch in range(epoches):
@@ -56,6 +58,12 @@ def train(model, dataloader, optimizer, scheduler, criterion, device, epochs):
       scheduler.step()
   
       total_loss += loss.item()
+
+      # 新增
+      # 记录step级别的损失和学习率
+      global_step = epoch * len(dataloader) + step
+      writer.add_scalar('Train/Step Loss', loss.item(), global_step)
+      writer.add_scalar('Train/Learning Rate', lr, global_step)
   
       if step % 20 == 0:
         lr = scheduler.get_last_lr()[0]
@@ -66,7 +74,11 @@ def train(model, dataloader, optimizer, scheduler, criterion, device, epochs):
           f"LR: {lr:.8f}"
         )
       avg_loss = total_loss / len(dataloader)
+      # 新增
+      # 记录epoch级别的平均损失
+      writer.add_scalar('Train/Epoch Avg Loss', avg_loss, epoch)
       print(f"==== Epoch {epoch+1} Avg Loss: {avg_loss:.6f} ====")
+    writer.close()
 
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()
@@ -88,6 +100,12 @@ if __name__ == "__main__":
   print(f"Using device: {device}")
   
   os.makedirs(os.path.dirname(config.save_path), exists_ok=True)
+
+  # 新增
+  # 创建TensorBoard日志目录
+  log_dir = os.path.join(os.path.dirname(config.save_path), "tensorboard_logs")
+  os.makedirs(log_dir, exist_ok=True)
+  writer = SummaryWriter(log_dir=log_dir)
 
   processor = None
   wav2vec2_model = None
@@ -150,7 +168,8 @@ if __name__ == "__main__":
     scheduler=scheduler,
     criterion=criterion,
     device=device,
-    epochs=epochs
+    epochs=epochs,
+    writer=writer # 新增参数
   )
 
   torch.save(decoderModel.state_dict(), config.save_path)
