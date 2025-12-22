@@ -283,8 +283,13 @@ class WavSample:
     
 
 class AudioDataset(Dataset):
-    def __init__(self,processor, model, cache_path='./Dataset/zhuboshuolianbo/temp'):
-        ''' '''
+    def __init__(self,processor, model, module_mapping):
+        """
+        多模块音频数据集：支持从多个模块路径加载数据，并记录样本所属模块
+        :param module_mapping: 字典，格式为 {模块名: {"path": 模块数据路径, "sample_num": 样本数量}}
+        :param processor: 原有的wav2vec2处理器
+        :param model: 原有的wav2vec2模型
+        """  
         self.json_path = './Dataset/zhuboshuolianbo/json/'
         self.wav_path = './Dataset/zhuboshuolianbo/wav/'
         self.cache_path = cache_path
@@ -298,14 +303,67 @@ class AudioDataset(Dataset):
         self.processor = processor 
         self.model = model 
 
-        for _video in self.video_list:
-            j_p = os.path.join(self.json_path,'CD_'+_video+'_1.json')
-            w_p = os.path.join(self.wav_path,_video+'.wav')
-            wavSample = WavSample(j_p, w_p, processor=processor, model=model)
-            self.wavSampleManagerList.append(wavSample)
+        if processor is not None:
+            for _video in self.video_list:
+                j_p = os.path.join(self.json_path,'CD_'+_video+'_1.json')
+                w_p = os.path.join(self.wav_path,_video+'.wav')
+                wavSample = WavSample(j_p, w_p, processor=processor, model=model)
+                self.wavSampleManagerList.append(wavSample)
 
         self.input_list = [] 
         self.output_list = []
+
+        # 新增
+        self.module_mapping = module_mapping
+        self.samples = []  # 存储所有模块的样本
+        self.module_labels = []  # 存储每个样本的模块标签
+        # 遍历每个模块，加载样本并绑定标签
+        for module_name, module_info in module_mapping.items():
+            module_path = module_info["path"]  # 模块的缓存路径
+            sample_num = module_info["sample_num"]  # 该模块需要加载的样本数量
+
+            # 加载当前模块的样本
+            module_samples = self._load_module_samples(
+                cache_path=module_path,
+                sample_num=sample_num
+            )
+
+            # 将当前模块的样本和标签加入全局列表
+            self.samples.extend(module_samples)
+            self.module_labels.extend([module_name] * len(module_samples))
+
+    def _load_module_samples(self, cache_path, sample_num):
+        """
+        加载单个模块的样本（适配load_flag=True，从缓存目录加载指定总数量的样本）
+        :param cache_path: 模块缓存路径（存储xxx.pkl样本文件）
+        :param sample_num: 该模块需要加载的总样本数量
+        :return: list[(audio_feat, target)] 加载完成的样本列表
+        """
+        temp_samples = []
+
+        # 1. 遍历缓存目录下的pkl文件（复用原有_load_cache_from_dir逻辑）
+        if not os.path.exists(cache_path):
+            raise FileNotFoundError(f"模块缓存路径{cache_path}不存在！")
+        
+        # 获取缓存目录下所有pkl文件并排序
+        cache_files = sorted([f for f in os.listdir(cache_path) if f.endswith(".pkl")])
+        
+        # 2. 加载指定数量的样本
+        for file_idx, file_name in enumerate(tqdm(cache_files, desc=f"加载模块缓存 {cache_path}")):
+            file_path = os.path.join(cache_path, file_name)
+            try:
+                with open(file_path, 'rb') as f:
+                    data = pickle.load(f)
+                # 提取音频特征和目标特征（与原有缓存格式一致）
+                audio_feat = data['input']  # 对应原有缓存的input（audio feature）
+                target = data['output']     # 对应原有缓存的output（表情特征）
+                temp_samples.append((audio_feat, target))
+            except (pickle.UnpicklingError, EOFError, AttributeError, ValueError) as e:
+                raise RuntimeError(f"加载缓存文件{file_path}失败：{e}")
+        
+        return temp_samples
+
+    def __len__(self):
     
     def __len__(self):
         ''' '''
