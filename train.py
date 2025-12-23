@@ -168,7 +168,7 @@ if __name__ == "__main__":
   dataset = AudioDataset(
     processor=processor,
     model=wav2vec2_model,
-    cache_path=module_mapping
+    config=config.dataset
   )
   # 3. 生成样本级采样权重
   sample_weights = torch.tensor(
