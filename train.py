@@ -46,9 +46,16 @@ def train(model, dataloader, optimizer, scheduler, criterion, device, epochs, wr
   
   model.train()
   criterion.reduction = "none" # 改为"none"以获取每个样本的原始loss
+  # 提前构建模块名到权重的映射（方便快速查找）
+  loss_weight_map = module_loss_weight
   
   for epoch in range(epoches):
     total_loss = 0.0
+    # 新增：记录每个模块的原始loss和加权loss（解耦可视化）
+    module_raw_loss = {m: 0.0 for m in loss_weight_map.keys()}
+    module_weighted_loss = {m: 0.0 for m in loss_weight_map.keys()}
+    module_sample_count = {m: 0 for m in loss_weight_map.keys()}
+    
     for step, (audio_feat, target, module_labels) in enumerate(dataloader):
       # audio_feat: (B, 249, 768)
       # target: (B, 125, 136)
@@ -57,30 +64,45 @@ def train(model, dataloader, optimizer, scheduler, criterion, device, epochs, wr
       target = target.to(device)
   
       optimizer.zero_grad()
-  
       output = model(audio_feat)
+      
       # 新增：多数据源loss权重控制及可视化解耦
       # 1. 计算每个样本的原始loss（保留batch维度）
       sample_raw_loss = criterion(output, target).mean(dim=(1, 2))
+      
       # 2. 应用模块loss权重
       sample_weighted_loss = []
-      for loss, module in zip(sample_raw_loss, module_labels):
-          # 根据样本所属模块获取loss权重
-          weight = module_loss_weight[module]
-          sample_weighted_loss.append(loss * weight)
+      for idx, (loss, module) in enumerate(zip(sample_raw_loss, module_labels)):
+          weight = loss_weight_map[module]
+          weighted_loss = loss * weight
+          sample_weighted_loss.append(weighted_loss)
+          # 累计每个模块的原始/加权loss和样本数
+          module_raw_loss[module] += loss.item()
+          module_weighted_loss[module] += weighted_loss.item()
+          module_sample_count[module] += 1
+      
       # 3. 计算batch总损失并反向传播
       batch_loss = torch.stack(sample_weighted_loss).mean()  # 也可使用sum()
       batch_loss.backward()
       optimizer.step()
       scheduler.step()
+      
       # 4. 日志记录（新增模块loss监控）
       total_loss += batch_loss.item()
-      # 记录step级别的损失和学习率
       global_step = epoch * len(dataloader) + step
+      # 总loss
       writer.add_scalar('Train/Step Loss', batch_loss.item(), global_step)
+      # 各模块原始loss
+      for module in loss_weight_map.keys():
+          if module_sample_count[module] > 0:
+              avg_raw = module_raw_loss[module] / module_sample_count[module]
+              writer.add_scalar(f'Train/Step_{module}_Raw_Loss', avg_raw, global_step)
+              avg_weighted = module_weighted_loss[module] / module_sample_count[module]
+              writer.add_scalar(f'Train/Step_{module}_Weighted_Loss', avg_weighted, global_step)
+      # 学习率
       lr = scheduler.get_last_lr()[0]
       writer.add_scalar('Train/Learning Rate', lr, global_step)
-  
+      # 中间日志
       if step % 20 == 0:
         print(
           f"[Epoch {epoch+1}/{epoches}]"
@@ -88,12 +110,20 @@ def train(model, dataloader, optimizer, scheduler, criterion, device, epochs, wr
           f"Loss: {loss.item():.6f}"
           f"LR: {lr:.8f}"
         )
-      avg_loss = total_loss / len(dataloader)
+    # 5. Epoch级日志（解耦可视化）
+    avg_total_loss = total_loss / len(dataloader)
+    writer.add_scalar('Train/Epoch_Avg_Total_Loss', avg_total_loss, epoch)
+    # 各模块Epoch级原始/加权loss
+    for module in loss_weight_map.keys():
+        if module_sample_count[module] > 0:
+            epoch_avg_raw = module_raw_loss[module] / module_sample_count[module]
+            epoch_avg_weighted = module_weighted_loss[module] / module_sample_count[module]
+            writer.add_scalar(f'Train/Epoch_{module}_Raw_Loss', epoch_avg_raw, epoch)
+            writer.add_scalar(f'Train/Epoch_{module}_Weighted_Loss', epoch_avg_weighted, epoch)
+            print(f"  - {module}: Raw Loss={epoch_avg_raw:.6f}, Weighted Loss={epoch_avg_weighted:.6f}")
 
-      # 记录epoch级别的平均损失
-      writer.add_scalar('Train/Epoch Avg Loss', avg_loss, epoch)
-      print(f"==== Epoch {epoch+1} Avg Loss: {avg_loss:.6f} ====")
-    writer.close()
+    print(f"==== Epoch {epoch+1} Avg Loss: {avg_total_loss:.6f} ====")  
+  writer.close()
 
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()
@@ -198,7 +228,8 @@ if __name__ == "__main__":
     criterion=criterion,
     device=device,
     epochs=epochs,
-    writer=writer # 新增参数
+    writer=writer, # tensorboard
+    module_loss_weight=module_loss_weight  # loss权重
   )
 
   torch.save(decoderModel.state_dict(), config.save_path)
