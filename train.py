@@ -37,7 +37,7 @@ class WarmupCosineScheduler(torch.optim.lr_scheduler._LRScheduler):
       lrs.append(lr)
     return lrs
 
-def train(model, dataloader, optimizer, scheduler, criterion, device, epochs, writer, module_loss_weight):
+def train(model, dataloader, optimizer, scheduler, criterion, device, writer, config):
   """
   新增训练可视化，多源数据loss权重控制及可视化解耦
   :param writer: tensorboard的writer参数
@@ -46,54 +46,45 @@ def train(model, dataloader, optimizer, scheduler, criterion, device, epochs, wr
   
   model.train()
   criterion.reduction = "none" # 改为"none"以获取每个样本的原始loss
-  # 提前构建模块名到权重的映射（方便快速查找）
-  loss_weight_map = module_loss_weight
+  dataset_module_names = config.dataset_module_names
+  epochs = config.epochs
   
   for epoch in range(epoches):
     total_loss = 0.0
-    # 新增：记录每个模块的原始loss和加权loss（解耦可视化）
     module_raw_loss = {m: 0.0 for m in loss_weight_map.keys()}
     module_weighted_loss = {m: 0.0 for m in loss_weight_map.keys()}
     module_sample_count = {m: 0 for m in loss_weight_map.keys()}
     
-    for step, (audio_feat, target, module_labels) in enumerate(dataloader):
+    for step, (audio_feat, target, module_labels, loss_weights) in enumerate(dataloader):
       # audio_feat: (B, 249, 768)
       # target: (B, 125, 136)
-  
       audio_feat = audio_feat.to(device)
       target = target.to(device)
-  
       optimizer.zero_grad()
       output = model(audio_feat)
-      
-      # 新增：多数据源loss权重控制及可视化解耦
-      # 1. 计算每个样本的原始loss（保留batch维度）
+      # 计算每个样本的原始loss（保留batch维度）
       sample_raw_loss = criterion(output, target).mean(dim=(1, 2))
-      
-      # 2. 应用模块loss权重
+      # 应用模块loss权重
       sample_weighted_loss = []
-      for idx, (loss, module) in enumerate(zip(sample_raw_loss, module_labels)):
-          weight = loss_weight_map[module]
+      for idx, (loss, module, weight) in enumerate(zip(sample_raw_loss, module_labels, loss_weights)):
           weighted_loss = loss * weight
           sample_weighted_loss.append(weighted_loss)
           # 累计每个模块的原始/加权loss和样本数
           module_raw_loss[module] += loss.item()
           module_weighted_loss[module] += weighted_loss.item()
           module_sample_count[module] += 1
-      
-      # 3. 计算batch总损失并反向传播
+      # 计算batch总损失并反向传播
       batch_loss = torch.stack(sample_weighted_loss).mean()  # 也可使用sum()
       batch_loss.backward()
       optimizer.step()
       scheduler.step()
-      
-      # 4. 日志记录（新增模块loss监控）
+      # 日志记录（新增模块loss监控）
       total_loss += batch_loss.item()
       global_step = epoch * len(dataloader) + step
       # 总loss
       writer.add_scalar('Train/Step Loss', batch_loss.item(), global_step)
       # 各模块原始loss
-      for module in loss_weight_map.keys():
+      for module in dataset_module_names:
           if module_sample_count[module] > 0:
               avg_raw = module_raw_loss[module] / module_sample_count[module]
               writer.add_scalar(f'Train/Step_{module}_Raw_Loss', avg_raw, global_step)
@@ -110,11 +101,11 @@ def train(model, dataloader, optimizer, scheduler, criterion, device, epochs, wr
           f"Loss: {loss.item():.6f}"
           f"LR: {lr:.8f}"
         )
-    # 5. Epoch级日志（解耦可视化）
+    # Epoch级日志（解耦可视化）
     avg_total_loss = total_loss / len(dataloader)
     writer.add_scalar('Train/Epoch_Avg_Total_Loss', avg_total_loss, epoch)
     # 各模块Epoch级原始/加权loss
-    for module in loss_weight_map.keys():
+    for module in dataset_module_names:
         if module_sample_count[module] > 0:
             epoch_avg_raw = module_raw_loss[module] / module_sample_count[module]
             epoch_avg_weighted = module_weighted_loss[module] / module_sample_count[module]
@@ -146,47 +137,30 @@ if __name__ == "__main__":
   
   os.makedirs(os.path.dirname(config.save_path), exists_ok=True)
 
-  # 新增：训练可视化
-  # 创建TensorBoard日志目录
-  timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
-  log_dir = os.path.join(os.path.dirname(config.save_path), "tensorboard_logs", timestamp)
-  os.makedirs(log_dir, exist_ok=True)
-  writer = SummaryWriter(log_dir=log_dir)
-  
   processor = None
   wav2vec2_model = None
   if config.dataset.use_processor:
     processor = Wav2Vec2Peocessor.from_pretrained(config.wav2vec2.path)
     wav2vec2_model = Wav2Vec2Model.from_pretrained(config.wav2vec2.path)
 
-  # 新增：多源数据采样概率控制
-  # 1. 读取多模块配置
-  module_mapping = config.dataset.module_mapping  # {模块名: {"path": 路径, "sample_num": 总样本数}}
-  module_sample_weight = config.dataset.module_sample_weight  # 采样权重
-  module_loss_weight = config.dataset.module_loss_weight      # loss权重
-  # 2. 初始化多模块数据集（替换原单路径dataset）
+  # 初始化多模块数据集（替换原单路径dataset）
   dataset = AudioDataset(
     processor=processor,
     model=wav2vec2_model,
     config=config.dataset
   )
-  # 3. 生成样本级采样权重
-  sample_weights = torch.tensor(
-      [module_sample_weight[module_label] for module_label in dataset.module_labels],
-      dtype=torch.float32
-  )
-  # 4. 创建加权采样器
+  # 创建加权采样器
   sampler = WeightedRandomSampler(
-      weights=sample_weights,
-      num_samples=len(dataset),
-      replacement=True
+      weights=dataset.sample_weights,
+      num_samples=config.dataloader.sampler.get('oversample_factor', 1) * len(dataset),
+      replacement=config.dataloader.sampler.replacement
   )
-  # 5. 创建DataLoader（使用采样器，关闭shuffle）
+  # 创建DataLoader（使用采样器，关闭shuffle）
   dataloader = DataLoader(
       dataset,
       batch_size=config.dataset.batch_size,
-      sampler=sampler,  # 使用加权采样器
-      shuffle=False,    # 采样器已控制随机性
+      sampler=sampler,
+      shuffle=config.dataloader.shuffle,
       num_workers=config.dataset.num_workers,
       pin_memory=config.dataset.pin_memory
   )
@@ -200,22 +174,28 @@ if __name__ == "__main__":
     dropout=config.model.dropout
   ).to(device)
 
+  # 创建TensorBoard日志目录
+  timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+  log_dir = os.path.join(os.path.dirname(config.save_path), "tensorboard_logs", timestamp)
+  os.makedirs(log_dir, exist_ok=True)
+  writer = SummaryWriter(log_dir=log_dir)
+  
   optimizer = AdamW(
     decoderModel.parameters(),
-    lr=config.optimizer.lr,
-    weight_decay=config.optimizer.weight_decay
+    lr=config.training.optimizer.lr,
+    weight_decay=config.training.optimizer.weight_decay
   )
 
-  epoches = config.training.epochs
   steps_per_epoch = len(dataloader)
-  total_steps = steps_per_epoch * epochs
+  total_steps = steps_per_epoch * config.training.epochs
+  
   warmup_steps = int(config.scheduler.warmup_ratio * total_steps)
 
   scheduler = WarmupCosineScheduler(
     optimizer,
     warmup_steps=warmup_steps,
     total_steps=total_steps,
-    min_lr=config.scheduler.min_lr
+    min_lr=config.training.scheduler.min_lr
   )
 
   criterion = nn.MSELoss()
@@ -227,9 +207,8 @@ if __name__ == "__main__":
     scheduler=scheduler,
     criterion=criterion,
     device=device,
-    epochs=epochs,
     writer=writer, # tensorboard
-    module_loss_weight=module_loss_weight  # loss权重
+    config=config.training
   )
 
   torch.save(decoderModel.state_dict(), config.save_path)
