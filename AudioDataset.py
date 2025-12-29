@@ -381,7 +381,7 @@ class AudioDataset(Dataset):
                 # 提取音频特征和目标特征（与原有缓存格式一致）
                 audio_feat = data['input']  # 对应原有缓存的input（audio feature）
                 target = data['output']     # 对应原有缓存的output（表情特征）
-                temp_samples.append((audio_feat, target))
+                loaded_samples.append((audio_feat, target))
 
                 # 对于sequential模式，提前退出避免不必要的I/O
                 if (
