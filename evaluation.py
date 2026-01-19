@@ -45,6 +45,7 @@ def setup_logging(log_dir: str = "./logs"):
 class Audio2FaceTester:
     def __init__(
         self, 
+        model: dict,
         model_weights_path: str,
         wav2vec_path: str = "./wav2vec2-base-960h",
         device: str = None,
@@ -91,7 +92,7 @@ class Audio2FaceTester:
         self.fps = fps
         
         # 加载模型
-        self._load_models(model_weights_path, wav2vec_path)
+        self._load_models(model_weights_path, wav2vec_path, model)
         
         # 性能统计
         self.inference_times = []
@@ -106,7 +107,7 @@ class Audio2FaceTester:
           output_dir=self.visualization_dir
         )
         
-    def _load_models(self, model_weights_path: str, wav2vec_path: str):
+    def _load_models(self, model_weights_path: str, wav2vec_path: str, model: dict):
         """加载所有需要的模型"""
         try:
             self.logger.info("加载wav2vec2模型...")
@@ -116,10 +117,10 @@ class Audio2FaceTester:
             
             self.logger.info("加载Transformer解码器...")
             self.decoder = TransformerStackedDecoder(
-                input_dim=768,
-                output_dim=136,  # 假设模型输出136维
-                num_heads=16,
-                num_layers=9
+                input_dim=model.input_dim,
+                output_dim=model.output_dim, 
+                num_heads=model.num_heads,
+                num_layers=model.num_layers
             ).to(self.device)
             
             # 加载权重
@@ -1466,6 +1467,7 @@ def main():
     """主函数"""
     # 配置参数
     CONFIG = {
+        'model': {"input_dim": 768, "output_dim": 136, "num_layers": 11, "num_heads": 24},
         'model_weights': "./Weights/transformer_decoder_V3.pth",  # 模型权重路径
         'wav2vec_path': "./wav2vec-base-960h",
         'test_data_dir': "./test",  # 测试数据目录
@@ -1480,6 +1482,7 @@ def main():
     try:
         # 创建测试器
         tester = Audio2FaceTester(
+            model=model,
             model_weights_path=CONFIG['model_weights'],
             wav2vec_path=CONFIG['wav2vec_path'],
             device=CONFIG['device'],
