@@ -501,6 +501,8 @@ class Audio2FaceTester:
     def run_test_suite(
         self, 
         test_data_dir: str,
+        wav_dir: str,
+        gt_json_dir: str,
         result_name: str = "test_run"
     ) -> pd.DataFrame:
         """
@@ -514,8 +516,8 @@ class Audio2FaceTester:
             包含所有测试结果的DataFrame
         """
         test_dir = Path(test_data_dir)
-        wav_dir = test_dir / "wav"
-        gt_json_dir = test_dir / "json"
+        wav_dir = Path(wav_dir)
+        gt_json_dir = Path(gt_json_dir)
         
         # 检查目录
         if not wav_dir.exists():
@@ -1465,6 +1467,12 @@ class FacialParamVisualizer:
 
 def main():
     """主函数"""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default="config.yaml", help="path to config file")
+    args = parser.parse_args()
+
+    config = OmegaConf.load(args.config)
+    
     # 配置参数
     CONFIG = {
         'model': {"input_dim": 768, "output_dim": 136, "num_layers": 11, "num_heads": 24},
@@ -1481,6 +1489,7 @@ def main():
     
     try:
         # 创建测试器
+        '''
         tester = Audio2FaceTester(
             model=model,
             model_weights_path=CONFIG['model_weights'],
@@ -1496,6 +1505,25 @@ def main():
         results_df = tester.run_test_suite(
             test_data_dir=CONFIG['test_data_dir'],
             result_name=CONFIG['result_name']
+        )
+        '''
+        tester = Audio2FaceTester(
+            model=config.model,
+            model_weights_path=config.model_weights,
+            wav2vec_path=config.wav2vec.path,
+            device=config.device,
+            output_dir=config.tester.output_dir,
+            param_mapping_path=config.visualizer.param_mapping_path,
+            max_params_per_category=config.visualizer.max_params_per_category,
+            fps=config.visualizer.fps
+        )
+        
+        # 运行测试套件
+        results_df = tester.run_test_suite(
+            test_data_dir=config.tester.test_data_dir,
+            wav_dir=config.tester.wav_dir,
+            gt_json_dir=config.tester.gt_json_dir,
+            result_name=config.visualizer.result_name
         )
         
         # 打印总结
