@@ -1,6 +1,7 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 from typing import Dict, List, Union, Optional
 from abc import ABC, abstractmethod
@@ -311,7 +312,7 @@ class CombinedLoss(BaseLoss):
         "value": loss_value.item(),
         "weighted": weight * loss_value.item()
       }
-    loss_dict["total"]: total_loss.item()
+    loss_dict["total"] = total_loss.item()
     return total_loss, loss_dict
 
   def get_config(self):
