@@ -397,6 +397,148 @@ class PearsonCorrelationLoss(BaseLoss):
         }
 
 
+# 改进的Pearson损失：添加正则化防止过拟合
+class RegularizedPearsonLoss(BaseLoss):
+    """
+    正则化的皮尔逊相关系数损失
+    添加惩罚项防止过拟合训练集的特定时序模式
+    
+    Config:
+        loss_type: "regularized_pearson"
+        mode: "per_feature" | "per_sequence" | "global"
+        weight: float 损失权重
+        alpha: float 相关系数权重 (default: 1.0)
+        beta: float 差分一致性权重 (default: 0.5)
+        gamma: float 方向一致性权重 (default: 0.3)
+        eps: float 数值稳定性参数
+    """
+    def __init__(self, mode="per_feature", weight=1.0, alpha=1.0, beta=0.5, gamma=0.3, eps=1e-8):
+        super().__init__()
+        self.mode = mode
+        self.weight = weight
+        self.alpha = alpha  # 相关系数项权重
+        self.beta = beta    # 差分一致性项权重
+        self.gamma = gamma  # 方向一致性项权重
+        self.eps = eps
+        
+    def _compute_pearson(self, x, y):
+        """计算皮尔逊相关系数"""
+        x_flat = x.view(-1)
+        y_flat = y.view(-1)
+        
+        x_mean = torch.mean(x_flat)
+        y_mean = torch.mean(y_flat)
+        
+        cov = torch.mean((x_flat - x_mean) * (y_flat - y_mean))
+        x_std = torch.std(x_flat, unbiased=False) + self.eps
+        y_std = torch.std(y_flat, unbiased=False) + self.eps
+        
+        return cov / (x_std * y_std)
+    
+    def _compute_differential_consistency(self, pred, target):
+        """
+        计算差分一致性
+        惩罚相邻时间步差分的不一致
+        """
+        pred_diff = pred[:, 1:] - pred[:, :-1]
+        target_diff = target[:, 1:] - target[:, :-1]
+        
+        # 重塑为二维张量，便于计算
+        B, T1, D = pred_diff.shape
+        pred_flat = pred_diff.reshape(-1, D)  # (B*(T-1), D)
+        target_flat = target_diff.reshape(-1, D)  # (B*(T-1), D)
+        
+        # 计算余弦相似度
+        cos_sim = F.cosine_similarity(pred_flat, target_flat, dim=-1)  # (B*(T-1),)
+        
+        # 计算平均损失
+        return 1.0 - torch.mean(cos_sim)
+    
+    def _compute_direction_consistency(self, pred, target):
+        """
+        计算方向一致性
+        只关注变化方向（符号）是否一致
+        """
+        pred_diff = pred[:, 1:] - pred[:, :-1]
+        target_diff = target[:, 1:] - target[:, :-1]
+        
+        pred_sign = torch.sign(pred_diff)
+        target_sign = torch.sign(target_diff)
+        
+        # 计算符号匹配率
+        match_rate = torch.mean((pred_sign == target_sign).float())
+        return 1.0 - match_rate
+    
+    def forward(self, pred, target):
+        """计算正则化的Pearson损失"""
+        B, T, D = pred.shape
+        
+        if self.mode == "per_feature":
+            pearson_losses = []
+            diff_losses = []
+            dir_losses = []
+            
+            for d in range(D):
+                pred_d = pred[:, :, d]
+                target_d = target[:, :, d]
+                
+                # 1. 相关系数项
+                pearson = self._compute_pearson(pred_d, target_d)
+                pearson_losses.append(1.0 - pearson)
+                
+                # 2. 差分一致性项（仅在时间步足够时计算）
+                if T > 1:
+                    diff_loss = self._compute_differential_consistency(
+                        pred_d.unsqueeze(-1), target_d.unsqueeze(-1)
+                    )
+                    diff_losses.append(diff_loss)
+                
+                # 3. 方向一致性项
+                if T > 1:
+                    dir_loss = self._compute_direction_consistency(
+                        pred_d.unsqueeze(-1), target_d.unsqueeze(-1)
+                    )
+                    dir_losses.append(dir_loss)
+            
+            # 聚合各项损失
+            pearson_term = torch.mean(torch.stack(pearson_losses))
+            diff_term = torch.mean(torch.stack(diff_losses)) if diff_losses else 0.0
+            dir_term = torch.mean(torch.stack(dir_losses)) if dir_losses else 0.0
+            
+        elif self.mode == "global":
+            # 全局计算
+            pearson = self._compute_pearson(pred, target)
+            pearson_term = 1.0 - pearson
+            
+            if T > 1:
+                diff_term = self._compute_differential_consistency(pred, target)
+                dir_term = self._compute_direction_consistency(pred, target)
+            else:
+                diff_term = 0.0
+                dir_term = 0.0
+        else:
+            raise ValueError(f"Unsupported mode: {self.mode}")
+        
+        # 组合各项损失
+        total_loss = (
+            self.alpha * pearson_term + 
+            self.beta * diff_term + 
+            self.gamma * dir_term
+        )
+        
+        return self.weight * total_loss
+    
+    def get_config(self):
+        return {
+            "mode": self.mode,
+            "weight": self.weight,
+            "alpha": self.alpha,
+            "beta": self.beta,
+            "gamma": self.gamma,
+            "eps": self.eps
+        }
+
+
 # combinded Loss
 class CombinedLoss(BaseLoss):
   """
